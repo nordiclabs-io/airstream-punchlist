@@ -2,6 +2,10 @@
 -- Sr Air Bud — Fix-It List : database setup
 -- Paste this entire file into Supabase > SQL Editor > New query
 -- and click RUN. Safe to run more than once.
+--
+-- BEFORE RUNNING: replace REPLACE-WITH-YOUR-ACCESS-CODE below with
+-- the code you want to share with the dealer. Never commit the real
+-- code to this repository — it is public.
 -- ============================================================
 
 -- Issues on the punch list
@@ -18,6 +22,7 @@ create table if not exists issues (
 );
 
 -- Backfill the unique constraint on databases created before it was added.
+-- Without it, two first-time visitors racing each other each seed the list.
 do $$
 begin
   alter table issues add constraint issues_num_key unique (num);
@@ -43,32 +48,98 @@ create table if not exists photos (
   created_at timestamptz not null default now()
 );
 
--- Open access: anyone with the site link can read and edit.
+-- ============================================================
+-- Shared login
+-- Everyone (owner + service team) signs in as one account using the
+-- access code. The app does this behind the scenes when someone types
+-- the code, so nobody sees an email prompt.
+-- ============================================================
+
+do $$
+declare
+  crew_id uuid := '70c77437-7c19-4b50-af94-5e508642ebac';
+  crew_email text := 'crew@srairbud.app';
+  crew_code text := 'REPLACE-WITH-YOUR-ACCESS-CODE';
+begin
+  if exists (select 1 from auth.users where id = crew_id) then
+    return;
+  end if;
+
+  insert into auth.users (
+    instance_id, id, aud, role, email, encrypted_password,
+    email_confirmed_at, created_at, updated_at,
+    raw_app_meta_data, raw_user_meta_data, is_sso_user, is_anonymous,
+    -- GoTrue reads these as non-null strings; leaving them NULL breaks sign-in.
+    confirmation_token, recovery_token, email_change_token_new,
+    email_change_token_current, email_change, phone_change,
+    phone_change_token, reauthentication_token
+  ) values (
+    '00000000-0000-0000-0000-000000000000', crew_id, 'authenticated', 'authenticated',
+    crew_email, extensions.crypt(crew_code, extensions.gen_salt('bf')),
+    now(), now(), now(),
+    '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false, false,
+    '', '', '', '', '', '', '', ''
+  );
+
+  insert into auth.identities (
+    provider_id, user_id, identity_data, provider, last_sign_in_at, created_at, updated_at
+  ) values (
+    crew_id::text, crew_id,
+    jsonb_build_object('sub', crew_id::text, 'email', crew_email,
+                       'email_verified', true, 'phone_verified', false),
+    'email', now(), now(), now()
+  );
+end $$;
+
+-- ============================================================
+-- Access rules
+-- Bound to the one crew account rather than to "any signed-in user",
+-- so that creating an account is not by itself a way past the gate.
+-- ============================================================
+
 alter table issues enable row level security;
 alter table notes  enable row level security;
 alter table photos enable row level security;
 
 drop policy if exists "public all issues" on issues;
-create policy "public all issues" on issues for all using (true) with check (true);
-drop policy if exists "public all notes" on notes;
-create policy "public all notes" on notes for all using (true) with check (true);
+drop policy if exists "public all notes"  on notes;
 drop policy if exists "public all photos" on photos;
-create policy "public all photos" on photos for all using (true) with check (true);
 
--- Storage bucket for photos (public read)
+drop policy if exists "crew all issues" on issues;
+create policy "crew all issues" on issues for all to authenticated
+  using ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac')
+  with check ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
+
+drop policy if exists "crew all notes" on notes;
+create policy "crew all notes" on notes for all to authenticated
+  using ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac')
+  with check ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
+
+drop policy if exists "crew all photos" on photos;
+create policy "crew all photos" on photos for all to authenticated
+  using ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac')
+  with check ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
+
+-- Private photo bucket; the app serves images through signed URLs.
 insert into storage.buckets (id, name, public)
-values ('punchlist-photos', 'punchlist-photos', true)
-on conflict (id) do nothing;
+values ('punchlist-photos', 'punchlist-photos', false)
+on conflict (id) do update set public = false;
 
-drop policy if exists "public read punchlist photos" on storage.objects;
-create policy "public read punchlist photos" on storage.objects
-  for select using (bucket_id = 'punchlist-photos');
+drop policy if exists "public read punchlist photos"   on storage.objects;
 drop policy if exists "public upload punchlist photos" on storage.objects;
-create policy "public upload punchlist photos" on storage.objects
-  for insert with check (bucket_id = 'punchlist-photos');
 drop policy if exists "public delete punchlist photos" on storage.objects;
-create policy "public delete punchlist photos" on storage.objects
-  for delete using (bucket_id = 'punchlist-photos');
+
+drop policy if exists "crew read punchlist photos" on storage.objects;
+create policy "crew read punchlist photos" on storage.objects for select to authenticated
+  using (bucket_id = 'punchlist-photos' and (select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
+
+drop policy if exists "crew upload punchlist photos" on storage.objects;
+create policy "crew upload punchlist photos" on storage.objects for insert to authenticated
+  with check (bucket_id = 'punchlist-photos' and (select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
+
+drop policy if exists "crew delete punchlist photos" on storage.objects;
+create policy "crew delete punchlist photos" on storage.objects for delete to authenticated
+  using (bucket_id = 'punchlist-photos' and (select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
 
 -- Live updates: lets the owner and dealer see each other's changes instantly
 do $$
