@@ -7,7 +7,7 @@
 -- Issues on the punch list
 create table if not exists issues (
   id uuid primary key default gen_random_uuid(),
-  num int not null,
+  num int not null unique,
   loc text not null default '',
   descr text not null default '',
   safety boolean not null default false,
@@ -16,6 +16,13 @@ create table if not exists issues (
   y real not null default 180,
   created_at timestamptz not null default now()
 );
+
+-- Backfill the unique constraint on databases created before it was added.
+do $$
+begin
+  alter table issues add constraint issues_num_key unique (num);
+exception when duplicate_table or duplicate_object then null;
+end $$;
 
 -- Notes & questions on an issue
 create table if not exists notes (
