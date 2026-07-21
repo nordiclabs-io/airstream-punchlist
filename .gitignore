@@ -3,3 +3,8 @@ dist
 .env
 .env.local
 .DS_Store
+
+# Local-only working notes for Claude Code — contains access codes, never commit
+CLAUDE.md
+.claude/
+.secrets-to-check
