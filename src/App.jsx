@@ -4,7 +4,7 @@ import { SEED } from "./seed.js";
 import {
   fetchAll, seedIfEmpty, createIssue, updateIssueDb, deleteIssueDb,
   addNoteDb, resolveNoteDb, addPhotoDb, deletePhotoDb, subscribeAll,
-  signIn, signOut, currentSession, onAuthChange,
+  signIn, signOut, currentSession, onAuthChange, sessionCanEdit,
 } from "./db.js";
 
 /* ================= Sr Air Bud — Fix-It Tracker =================
@@ -106,7 +106,7 @@ function Floorplan({ issues, selectedId, onSelectPin, placing, onPlace, filterFn
 }
 
 /* ================= Photo strip ================= */
-function Photos({ issue, onAdd, onRemove, demo }) {
+function Photos({ issue, onAdd, onRemove, demo, canEdit }) {
   const [busy, setBusy] = useState(false);
   const [zoom, setZoom] = useState(null);
   const fileRef = useRef(null);
@@ -135,17 +135,24 @@ function Photos({ issue, onAdd, onRemove, demo }) {
           <div key={p.id} style={{ position: "relative" }}>
             <img src={p.url} alt="Issue photo" onClick={() => setZoom(p.url)}
               style={{ width: 74, height: 74, objectFit: "cover", borderRadius: 8, border: "1px solid #C9CFD4", cursor: "zoom-in" }} />
-            <button aria-label="Remove photo" onClick={async () => {
-              if (!demo) { try { await deletePhotoDb(p); } catch { /* ok */ } }
-              onRemove(p);
-            }}
-              style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: 10, border: "none", background: "#3A4046", color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: "20px", padding: 0 }}>×</button>
+            {canEdit && (
+              <button aria-label="Remove photo" onClick={async () => {
+                if (!demo) { try { await deletePhotoDb(p); } catch { /* ok */ } }
+                onRemove(p);
+              }}
+                style={{ position: "absolute", top: -6, right: -6, width: 20, height: 20, borderRadius: 10, border: "none", background: "#3A4046", color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: "20px", padding: 0 }}>×</button>
+            )}
           </div>
         ))}
-        <button onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}
-          style={{ width: 74, height: 74, borderRadius: 8, border: "2px dashed #9AA1A7", background: "transparent", color: "#5B6369", cursor: "pointer", fontSize: 12 }}>
-          {busy ? "Saving…" : "+ Photo"}
-        </button>
+        {canEdit && (
+          <button onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}
+            style={{ width: 74, height: 74, borderRadius: 8, border: "2px dashed #9AA1A7", background: "transparent", color: "#5B6369", cursor: "pointer", fontSize: 12 }}>
+            {busy ? "Saving…" : "+ Photo"}
+          </button>
+        )}
+        {!canEdit && issue.photos.length === 0 && (
+          <span style={{ fontSize: 13, color: "#8A9298" }}>No photos yet.</span>
+        )}
         <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
           onChange={(e) => e.target.files && e.target.files.length && handleFiles(e.target.files)} />
       </div>
@@ -170,8 +177,8 @@ function CodeGate({ onUnlock }) {
     if (!code.trim() || busy) return;
     setBusy(true); setErr("");
     try {
-      await signIn(code.trim());
-      onUnlock();
+      const canEdit = await signIn(code.trim());
+      onUnlock(canEdit);
     } catch {
       setErr("That code didn't work. Check with the owner and try again.");
       setBusy(false);
@@ -185,7 +192,7 @@ function CodeGate({ onUnlock }) {
           Sr Air Bud · Fix-It List
         </div>
         <label htmlFor="code" style={{ display: "block", fontSize: 13.5, color: "#5B6369", marginBottom: 8 }}>
-          Enter the access code to view and update the punch list.
+          Enter the access code to open the punch list.
         </label>
         <input id="code" value={code} onChange={(e) => setCode(e.target.value)} autoFocus
           type="password" inputMode="numeric" autoComplete="current-password" placeholder="6-digit code"
@@ -203,11 +210,63 @@ function CodeGate({ onUnlock }) {
   );
 }
 
+/* ================= Unlock editing ================= */
+function UnlockDialog({ onClose, onUnlocked }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!code.trim() || busy) return;
+    setBusy(true); setErr("");
+    try {
+      const canEdit = await signIn(code.trim());
+      if (!canEdit) {
+        setErr("That's the view-only code. You need the edit code to make changes.");
+        setBusy(false);
+        return;
+      }
+      onUnlocked();
+    } catch {
+      setErr("That code didn't work.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div role="dialog" aria-label="Unlock editing" onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(20,23,26,0.6)", display: "grid", placeItems: "center", zIndex: 70, padding: 16 }}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={submit}
+        style={{ background: "#fff", border: "1px solid #C9CFD4", borderRadius: 14, padding: 20, maxWidth: 340, width: "100%", fontFamily: "'Barlow', system-ui, sans-serif" }}>
+        <div style={{ fontWeight: 600, fontSize: 16, marginBottom: 6 }}>Unlock editing</div>
+        <div style={{ fontSize: 13, color: "#5B6369", marginBottom: 10 }}>
+          You're viewing in read-only mode. Enter the edit code to make changes.
+        </div>
+        <input value={code} onChange={(e) => setCode(e.target.value)} autoFocus type="password"
+          autoComplete="current-password" placeholder="Edit code" aria-label="Edit code"
+          style={{ width: "100%", padding: "9px 11px", borderRadius: 8, border: "1px solid #C9CFD4", fontSize: 15, fontFamily: "inherit" }} />
+        {err && <div role="alert" style={{ marginTop: 8, fontSize: 12.5, color: "#C0392B" }}>{err}</div>}
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <button type="button" onClick={onClose}
+            style={{ flex: 1, padding: "9px 12px", borderRadius: 8, border: "1px solid #C9CFD4", background: "#fff", color: "#3A4046", fontSize: 14, fontFamily: "inherit", cursor: "pointer" }}>Cancel</button>
+          <button type="submit" disabled={busy || !code.trim()}
+            style={{ flex: 1, padding: "9px 12px", borderRadius: 8, border: "1px solid #2E3A45", background: "#2E3A45", color: "#fff", fontSize: 14, fontFamily: "inherit", cursor: "pointer", opacity: busy || !code.trim() ? 0.6 : 1 }}>
+            {busy ? "Checking…" : "Unlock"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 /* ================= Main App ================= */
 export default function App() {
   const demo = !supabase;
   const [authed, setAuthed] = useState(demo);
   const [authReady, setAuthReady] = useState(demo);
+  const [canEdit, setCanEdit] = useState(demo);
+  const [unlockOpen, setUnlockOpen] = useState(false);
   const [doc, setDoc] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [placing, setPlacing] = useState(false);
@@ -262,10 +321,12 @@ export default function App() {
     currentSession().then((s) => {
       if (!alive) return;
       setAuthed(!!s);
+      setCanEdit(sessionCanEdit(s));
       setAuthReady(true);
     });
     const unsub = onAuthChange((s) => {
       setAuthed(!!s);
+      setCanEdit(sessionCanEdit(s));
       setAuthReady(true);
       if (!s) setDoc(null);
     });
@@ -450,7 +511,7 @@ export default function App() {
     );
   }
 
-  if (!authed) return <CodeGate onUnlock={() => setAuthed(true)} />;
+  if (!authed) return <CodeGate onUnlock={(edit) => { setCanEdit(edit); setAuthed(true); }} />;
 
   if (!doc) {
     return (
@@ -472,28 +533,40 @@ export default function App() {
         <span style={{ minWidth: 34, height: 34, borderRadius: 17, background: STATUS[selected.status].color, color: "#fff", display: "grid", placeItems: "center", fontWeight: 700, fontSize: 16, fontFamily: "'Barlow Condensed', sans-serif" }}>{selected.num}</span>
         <div style={{ flex: 1, minWidth: 200 }}>
           <input value={selected.loc} onChange={(e) => updateIssueText(selected.id, { loc: e.target.value })} aria-label="Location"
-            style={{ width: "100%", fontWeight: 600, fontSize: 16, border: "none", borderBottom: "1px dashed #C9CFD4", padding: "2px 0", fontFamily: "inherit", background: "transparent" }} />
+            readOnly={!canEdit}
+            style={{ width: "100%", fontWeight: 600, fontSize: 16, border: "none", borderBottom: canEdit ? "1px dashed #C9CFD4" : "none", padding: "2px 0", fontFamily: "inherit", background: "transparent" }} />
           <textarea value={selected.desc} onChange={(e) => updateIssueText(selected.id, { desc: e.target.value })} aria-label="Issue description"
-            placeholder="Describe the issue…" rows={2}
-            style={{ width: "100%", fontSize: 13.5, border: "none", borderBottom: "1px dashed #C9CFD4", padding: "4px 0", fontFamily: "inherit", resize: "vertical", background: "transparent", color: "#3A4046" }} />
+            placeholder={canEdit ? "Describe the issue…" : ""} rows={2} readOnly={!canEdit}
+            style={{ width: "100%", fontSize: 13.5, border: "none", borderBottom: canEdit ? "1px dashed #C9CFD4" : "none", padding: "4px 0", fontFamily: "inherit", resize: "vertical", background: "transparent", color: "#3A4046" }} />
         </div>
         <button onClick={() => setSelectedId(null)} aria-label="Close details" style={{ ...btn(false), padding: "5px 10px" }}>✕</button>
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10, alignItems: "center" }}>
-        <select value={selected.status} onChange={(e) => updateIssue(selected.id, { status: e.target.value })} aria-label="Status"
-          style={{ padding: "7px 10px", borderRadius: 8, border: "1px solid #C9CFD4", fontSize: 13, fontFamily: "inherit", background: STATUS[selected.status].bg, color: STATUS[selected.status].color, fontWeight: 600 }}>
-          {STATUS_ORDER.map((s) => <option key={s} value={s}>{STATUS[s].label}</option>)}
-        </select>
-        <button style={btn(selected.safety)} onClick={() => updateIssue(selected.id, { safety: !selected.safety })}>⚠ Safety item</button>
-        <button style={btn(false)} onClick={() => { setMovingId(selected.id); setMapOpen(true); }}>Move pin</button>
-        <button style={{ ...btn(false), color: "#C0392B", borderColor: "#E3B4AC" }}
-          onClick={() => { if (window.confirm(`Delete issue #${selected.num} — ${selected.loc}? This can't be undone.`)) deleteIssue(selected); }}>Delete</button>
+        {canEdit ? (
+          <select value={selected.status} onChange={(e) => updateIssue(selected.id, { status: e.target.value })} aria-label="Status"
+            style={{ padding: "7px 10px", borderRadius: 8, border: "1px solid #C9CFD4", fontSize: 13, fontFamily: "inherit", background: STATUS[selected.status].bg, color: STATUS[selected.status].color, fontWeight: 600 }}>
+            {STATUS_ORDER.map((s) => <option key={s} value={s}>{STATUS[s].label}</option>)}
+          </select>
+        ) : (
+          <span style={{ padding: "7px 10px", borderRadius: 8, fontSize: 13, background: STATUS[selected.status].bg, color: STATUS[selected.status].color, fontWeight: 600 }}>
+            {STATUS[selected.status].label}
+          </span>
+        )}
+        {!canEdit && selected.safety && (
+          <span style={{ fontSize: 12.5, color: "#C0392B", fontWeight: 600 }}>⚠ Safety item</span>
+        )}
+        {canEdit && <>
+          <button style={btn(selected.safety)} onClick={() => updateIssue(selected.id, { safety: !selected.safety })}>⚠ Safety item</button>
+          <button style={btn(false)} onClick={() => { setMovingId(selected.id); setMapOpen(true); }}>Move pin</button>
+          <button style={{ ...btn(false), color: "#C0392B", borderColor: "#E3B4AC" }}
+            onClick={() => { if (window.confirm(`Delete issue #${selected.num} — ${selected.loc}? This can't be undone.`)) deleteIssue(selected); }}>Delete</button>
+        </>}
       </div>
 
       <div style={{ marginTop: 14 }}>
         <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 600, fontSize: 15, letterSpacing: 0.8, textTransform: "uppercase", color: "#5B6369", marginBottom: 6 }}>Photos</div>
-        <Photos issue={selected} demo={demo}
+        <Photos issue={selected} demo={demo} canEdit={canEdit}
           onAdd={(p) => patchLocal(selected.id, (i) => ({ photos: [...i.photos, p] }))}
           onRemove={(p) => patchLocal(selected.id, (i) => ({ photos: i.photos.filter((x) => x.id !== p.id) }))} />
       </div>
@@ -503,7 +576,13 @@ export default function App() {
           Notes & questions
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {selected.notes.length === 0 && <div style={{ fontSize: 13, color: "#8A9298" }}>No notes yet. Add a repair note or ask a question — anyone with the link can reply.</div>}
+          {selected.notes.length === 0 && (
+            <div style={{ fontSize: 13, color: "#8A9298" }}>
+              {canEdit
+                ? "No notes yet. Add a repair note or ask a question — anyone with the edit code can reply."
+                : "No notes yet."}
+            </div>
+          )}
           {selected.notes.map((n) => (
             <div key={n.id} style={{ background: n.type === "question" ? "#FBF3E0" : "#F5F6F7", borderRadius: 8, padding: "8px 10px", fontSize: 13.5, borderLeft: `3px solid ${n.type === "question" ? "#B57A0E" : "#2C6E8A"}` }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
@@ -515,7 +594,7 @@ export default function App() {
                 <span style={{ fontSize: 11, color: "#8A9298" }}>{fmtDate(n.ts)}</span>
               </div>
               {n.text}
-              {n.type === "question" && !n.resolved && (
+              {n.type === "question" && !n.resolved && canEdit && (
                 <div style={{ marginTop: 6 }}>
                   <button style={{ ...btn(false), padding: "4px 9px", fontSize: 12 }}
                     onClick={() => resolveQuestion(selected.id, n.id)}>
@@ -526,7 +605,7 @@ export default function App() {
             </div>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        {canEdit && <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
           <textarea value={noteText} onChange={(e) => setNoteText(e.target.value)} rows={2}
             placeholder="Add a repair note or a question…"
             aria-label="New note"
@@ -540,7 +619,7 @@ export default function App() {
             </label>
             <button style={{ ...btn(true), padding: "8px 16px" }} onClick={addNote} disabled={!noteText.trim()}>Add {noteIsQuestion ? "question" : "note"}</button>
           </div>
-        </div>
+        </div>}
       </div>
     </section>
   ) : null;
@@ -566,7 +645,7 @@ export default function App() {
         <span style={{ flex: 1 }} />
         <button style={{ ...btn(false), padding: "5px 10px", fontSize: 12.5 }} onClick={() => setMapOpen(!mapOpen)}
           aria-expanded={mapOpen}>{mapOpen ? "Hide map ▴" : "Show map ▾"}</button>
-        {!placing && !movingId ? (
+        {!canEdit ? null : !placing && !movingId ? (
           <button onClick={() => { setPlacing(true); setSelectedId(null); setMapOpen(true); }}
             style={{ ...btn(true), padding: "5px 11px", fontSize: 12.5 }}>+ Add issue</button>
         ) : (
@@ -628,6 +707,9 @@ export default function App() {
       <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search…" aria-label="Search issues"
         style={{ flex: "1 1 110px", minWidth: 100, padding: "6px 9px", borderRadius: 8, border: "1px solid #C9CFD4", fontSize: 12.5, fontFamily: "inherit" }} />
       <button style={{ ...btn(false), padding: "6px 10px", fontSize: 12.5 }} onClick={copySummary}>{copied ? "Copied ✓" : "Copy summary"}</button>
+      {!demo && !canEdit && (
+        <button style={{ ...btn(true), padding: "6px 10px", fontSize: 12.5 }} onClick={() => setUnlockOpen(true)}>Unlock editing</button>
+      )}
       {!demo && (
         <button style={{ ...btn(false), padding: "6px 10px", fontSize: 12.5 }} onClick={() => signOut()}>Lock</button>
       )}
@@ -679,9 +761,18 @@ export default function App() {
 
         <div style={{ flexShrink: 0 }}>{diagramCard}</div>
         <div style={{ flexShrink: 0, maxWidth: 820, width: "100%", margin: "0 auto" }}>{toolbar}</div>
+        {!demo && !canEdit && (
+          <div style={{ flexShrink: 0, maxWidth: 820, width: "100%", margin: "0 auto 8px", background: "#EDEFF1", border: "1px solid #C9CFD4", borderRadius: 8, padding: "7px 10px", fontSize: 12.5, color: "#3A4046" }}>
+            Read-only — you can browse everything, but changes need the edit code.
+          </div>
+        )}
         {showHelp && (
           <div style={{ flexShrink: 0, maxWidth: 820, width: "100%", margin: "0 auto 8px", background: "#E6F0F5", border: "1px solid #2C6E8A", borderRadius: 8, padding: "7px 10px", fontSize: 12.5, display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ flex: 1 }}>New here? Tap any numbered pin or list item to see details, add photos, and leave notes or questions. Update the status inside each issue as repairs are completed.</span>
+            <span style={{ flex: 1 }}>
+              {canEdit
+                ? "New here? Tap any numbered pin or list item to see details, add photos, and leave notes or questions. Update the status inside each issue as repairs are completed."
+                : "New here? Tap any numbered pin or list item to see its details, photos, and notes."}
+            </span>
             <button onClick={dismissHelp} style={{ ...btn(false), padding: "3px 9px", fontSize: 12 }}>Got it</button>
           </div>
         )}
@@ -694,6 +785,11 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {unlockOpen && (
+        <UnlockDialog onClose={() => setUnlockOpen(false)}
+          onUnlocked={() => { setUnlockOpen(false); setCanEdit(true); }} />
+      )}
     </div>
   );
 }

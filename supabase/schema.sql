@@ -3,9 +3,14 @@
 -- Paste this entire file into Supabase > SQL Editor > New query
 -- and click RUN. Safe to run more than once.
 --
--- BEFORE RUNNING: replace REPLACE-WITH-YOUR-ACCESS-CODE below with
--- the code you want to share with the dealer. Never commit the real
--- code to this repository — it is public.
+-- BEFORE RUNNING: replace the two placeholder codes below. Never commit
+-- the real codes to this repository — it is public.
+--
+-- There are two shared logins:
+--   view code — opens the list read-only
+--   edit code — also allows changes
+-- The split is enforced by the policies at the bottom of this file, not by
+-- the app, so the view code cannot change anything even outside the website.
 -- ============================================================
 
 -- Issues on the punch list
@@ -49,21 +54,16 @@ create table if not exists photos (
 );
 
 -- ============================================================
--- Shared login
--- Everyone (owner + service team) signs in as one account using the
--- access code. The app does this behind the scenes when someone types
--- the code, so nobody sees an email prompt.
+-- The two shared logins
+-- The app signs in behind the scenes when someone types a code, so
+-- nobody ever sees an email prompt.
 -- ============================================================
 
-do $$
-declare
-  crew_id uuid := '70c77437-7c19-4b50-af94-5e508642ebac';
-  crew_email text := 'crew@srairbud.app';
-  crew_code text := 'REPLACE-WITH-YOUR-ACCESS-CODE';
+create or replace function public.ensure_crew_user(
+  user_id uuid, user_email text, user_code text
+) returns void language plpgsql security definer set search_path = '' as $$
 begin
-  if exists (select 1 from auth.users where id = crew_id) then
-    return;
-  end if;
+  if exists (select 1 from auth.users where id = user_id) then return; end if;
 
   insert into auth.users (
     instance_id, id, aud, role, email, encrypted_password,
@@ -74,8 +74,8 @@ begin
     email_change_token_current, email_change, phone_change,
     phone_change_token, reauthentication_token
   ) values (
-    '00000000-0000-0000-0000-000000000000', crew_id, 'authenticated', 'authenticated',
-    crew_email, extensions.crypt(crew_code, extensions.gen_salt('bf')),
+    '00000000-0000-0000-0000-000000000000', user_id, 'authenticated', 'authenticated',
+    user_email, extensions.crypt(user_code, extensions.gen_salt('bf')),
     now(), now(), now(),
     '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false, false,
     '', '', '', '', '', '', '', ''
@@ -84,41 +84,68 @@ begin
   insert into auth.identities (
     provider_id, user_id, identity_data, provider, last_sign_in_at, created_at, updated_at
   ) values (
-    crew_id::text, crew_id,
-    jsonb_build_object('sub', crew_id::text, 'email', crew_email,
+    user_id::text, user_id,
+    jsonb_build_object('sub', user_id::text, 'email', user_email,
                        'email_verified', true, 'phone_verified', false),
     'email', now(), now(), now()
   );
 end $$;
 
+select public.ensure_crew_user(
+  '70c77437-7c19-4b50-af94-5e508642ebac', 'crew@srairbud.app',
+  'REPLACE-WITH-YOUR-VIEW-CODE');
+
+select public.ensure_crew_user(
+  'b1e4d2a7-9c33-4f18-8a6b-2d5e7f019c44', 'editor@srairbud.app',
+  'REPLACE-WITH-YOUR-EDIT-CODE');
+
+drop function public.ensure_crew_user(uuid, text, text);
+
 -- ============================================================
 -- Access rules
--- Bound to the one crew account rather than to "any signed-in user",
--- so that creating an account is not by itself a way past the gate.
+-- Bound to specific account ids rather than to "any signed-in user", so
+-- that creating an account is not by itself a way past the gate.
+-- Reading needs either code; writing needs the edit code.
 -- ============================================================
 
 alter table issues enable row level security;
 alter table notes  enable row level security;
 alter table photos enable row level security;
 
+create or replace function public.is_editor() returns boolean
+language sql stable security invoker set search_path = ''
+as $$ select (select auth.uid()) = 'b1e4d2a7-9c33-4f18-8a6b-2d5e7f019c44'::uuid $$;
+
+create or replace function public.is_crew() returns boolean
+language sql stable security invoker set search_path = ''
+as $$ select (select auth.uid()) in (
+  '70c77437-7c19-4b50-af94-5e508642ebac'::uuid,
+  'b1e4d2a7-9c33-4f18-8a6b-2d5e7f019c44'::uuid) $$;
+
 drop policy if exists "public all issues" on issues;
 drop policy if exists "public all notes"  on notes;
 drop policy if exists "public all photos" on photos;
-
 drop policy if exists "crew all issues" on issues;
-create policy "crew all issues" on issues for all to authenticated
-  using ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac')
-  with check ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
-
-drop policy if exists "crew all notes" on notes;
-create policy "crew all notes" on notes for all to authenticated
-  using ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac')
-  with check ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
-
+drop policy if exists "crew all notes"  on notes;
 drop policy if exists "crew all photos" on photos;
-create policy "crew all photos" on photos for all to authenticated
-  using ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac')
-  with check ((select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
+
+drop policy if exists "read issues" on issues;
+create policy "read issues" on issues for select to authenticated using (public.is_crew());
+drop policy if exists "write issues" on issues;
+create policy "write issues" on issues for all to authenticated
+  using (public.is_editor()) with check (public.is_editor());
+
+drop policy if exists "read notes" on notes;
+create policy "read notes" on notes for select to authenticated using (public.is_crew());
+drop policy if exists "write notes" on notes;
+create policy "write notes" on notes for all to authenticated
+  using (public.is_editor()) with check (public.is_editor());
+
+drop policy if exists "read photos" on photos;
+create policy "read photos" on photos for select to authenticated using (public.is_crew());
+drop policy if exists "write photos" on photos;
+create policy "write photos" on photos for all to authenticated
+  using (public.is_editor()) with check (public.is_editor());
 
 -- Private photo bucket; the app serves images through signed URLs.
 insert into storage.buckets (id, name, public)
@@ -129,17 +156,21 @@ drop policy if exists "public read punchlist photos"   on storage.objects;
 drop policy if exists "public upload punchlist photos" on storage.objects;
 drop policy if exists "public delete punchlist photos" on storage.objects;
 
-drop policy if exists "crew read punchlist photos" on storage.objects;
-create policy "crew read punchlist photos" on storage.objects for select to authenticated
-  using (bucket_id = 'punchlist-photos' and (select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
-
+drop policy if exists "crew read punchlist photos"   on storage.objects;
 drop policy if exists "crew upload punchlist photos" on storage.objects;
-create policy "crew upload punchlist photos" on storage.objects for insert to authenticated
-  with check (bucket_id = 'punchlist-photos' and (select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
-
 drop policy if exists "crew delete punchlist photos" on storage.objects;
-create policy "crew delete punchlist photos" on storage.objects for delete to authenticated
-  using (bucket_id = 'punchlist-photos' and (select auth.uid()) = '70c77437-7c19-4b50-af94-5e508642ebac');
+
+drop policy if exists "read punchlist photos" on storage.objects;
+create policy "read punchlist photos" on storage.objects for select to authenticated
+  using (bucket_id = 'punchlist-photos' and public.is_crew());
+
+drop policy if exists "upload punchlist photos" on storage.objects;
+create policy "upload punchlist photos" on storage.objects for insert to authenticated
+  with check (bucket_id = 'punchlist-photos' and public.is_editor());
+
+drop policy if exists "delete punchlist photos" on storage.objects;
+create policy "delete punchlist photos" on storage.objects for delete to authenticated
+  using (bucket_id = 'punchlist-photos' and public.is_editor());
 
 -- Live updates: lets the owner and dealer see each other's changes instantly
 do $$
