@@ -1,10 +1,46 @@
-import { supabase, PHOTO_BUCKET } from "./supabase.js";
+import { supabase, PHOTO_BUCKET, CREW_EMAIL } from "./supabase.js";
 import { SEED } from "./seed.js";
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
+/* The photo bucket is private, so images are served through short-lived signed URLs.
+   fetchAll refreshes them on every load, on window focus, and on any live change. */
+const SIGNED_URL_TTL = 60 * 60 * 8;
+
+async function signedUrlMap(paths) {
+  if (!supabase || paths.length === 0) return {};
+  const { data, error } = await supabase.storage.from(PHOTO_BUCKET).createSignedUrls(paths, SIGNED_URL_TTL);
+  if (error) return {};
+  const map = {};
+  (data || []).forEach((d) => { if (d.path && d.signedUrl) map[d.path] = d.signedUrl; });
+  return map;
+}
+
+/* ---------- shared login ---------- */
+
+export async function signIn(code) {
+  const { error } = await supabase.auth.signInWithPassword({ email: CREW_EMAIL, password: code });
+  if (error) throw error;
+}
+
+export async function signOut() {
+  try { await supabase.auth.signOut(); } catch { /* already gone */ }
+}
+
+export async function currentSession() {
+  if (!supabase) return null;
+  const { data } = await supabase.auth.getSession();
+  return data.session;
+}
+
+export function onAuthChange(cb) {
+  if (!supabase) return () => {};
+  const { data } = supabase.auth.onAuthStateChange((_e, session) => cb(session));
+  return () => { try { data.subscription.unsubscribe(); } catch { /* ok */ } };
+}
+
 /* Map a DB issue row (+related) to the shape the UI uses */
-function toUiIssue(row, notes, photos) {
+function toUiIssue(row, notes, photos, urlMap) {
   return {
     id: row.id,
     num: row.num,
@@ -19,13 +55,8 @@ function toUiIssue(row, notes, photos) {
       .map((n) => ({ id: n.id, author: n.author, type: n.type, text: n.body, resolved: n.resolved, ts: new Date(n.created_at).getTime() })),
     photos: photos
       .filter((p) => p.issue_id === row.id)
-      .map((p) => ({ id: p.id, path: p.path, url: publicPhotoUrl(p.path) })),
+      .map((p) => ({ id: p.id, path: p.path, url: urlMap[p.path] || "" })),
   };
-}
-
-export function publicPhotoUrl(path) {
-  if (!supabase) return "";
-  return supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path).data.publicUrl;
 }
 
 export async function fetchAll() {
@@ -35,8 +66,9 @@ export async function fetchAll() {
     supabase.from("photos").select("*").order("created_at", { ascending: true }),
   ]);
   if (e1 || e2 || e3) throw e1 || e2 || e3;
+  const urlMap = await signedUrlMap((photos || []).map((p) => p.path));
   return {
-    issues: (issues || []).map((r) => toUiIssue(r, notes || [], photos || [])),
+    issues: (issues || []).map((r) => toUiIssue(r, notes || [], photos || [], urlMap)),
     nextNum: (issues || []).reduce((m, r) => Math.max(m, r.num), 0) + 1,
   };
 }
@@ -59,7 +91,7 @@ export async function createIssue({ num, x, y }) {
     .select()
     .single();
   if (error) throw error;
-  return toUiIssue(data, [], []);
+  return toUiIssue(data, [], [], {});
 }
 
 export async function updateIssueDb(id, patch) {
@@ -105,7 +137,8 @@ export async function addPhotoDb(issueId, blob) {
   if (e1) throw e1;
   const { data, error: e2 } = await supabase.from("photos").insert({ issue_id: issueId, path }).select().single();
   if (e2) throw e2;
-  return { id: data.id, path, url: publicPhotoUrl(path) };
+  const { data: signed } = await supabase.storage.from(PHOTO_BUCKET).createSignedUrl(path, SIGNED_URL_TTL);
+  return { id: data.id, path, url: (signed && signed.signedUrl) || "" };
 }
 
 export async function deletePhotoDb(photo) {
