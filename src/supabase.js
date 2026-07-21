@@ -12,5 +12,8 @@ export const supabase = url && key
 
 export const PHOTO_BUCKET = "punchlist-photos";
 
-/* Everyone shares one login; the code is the last 6 digits of the VIN. */
-export const CREW_EMAIL = "crew@srairbud.app";
+/* Two shared logins. The view code opens the list read-only; the edit code
+   also allows changes. Which one you typed decides what you can do — the
+   database enforces it, the UI just reflects it. */
+export const VIEWER_EMAIL = "crew@srairbud.app";
+export const EDITOR_EMAIL = "editor@srairbud.app";
