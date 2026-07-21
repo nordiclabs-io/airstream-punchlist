@@ -1,4 +1,4 @@
-import { supabase, PHOTO_BUCKET, CREW_EMAIL } from "./supabase.js";
+import { supabase, PHOTO_BUCKET, VIEWER_EMAIL, EDITOR_EMAIL } from "./supabase.js";
 import { SEED } from "./seed.js";
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -18,9 +18,21 @@ async function signedUrlMap(paths) {
 
 /* ---------- shared login ---------- */
 
+/** True when this session may change things (i.e. the edit code was used). */
+export function sessionCanEdit(session) {
+  return !!session && session.user && session.user.email === EDITOR_EMAIL;
+}
+
+/* One box, two possible codes: try the view code first since most people have
+   that one, then the edit code. Returns true when the code grants editing. */
 export async function signIn(code) {
-  const { error } = await supabase.auth.signInWithPassword({ email: CREW_EMAIL, password: code });
-  if (error) throw error;
+  const viewer = await supabase.auth.signInWithPassword({ email: VIEWER_EMAIL, password: code });
+  if (!viewer.error) return false;
+
+  const editor = await supabase.auth.signInWithPassword({ email: EDITOR_EMAIL, password: code });
+  if (!editor.error) return true;
+
+  throw editor.error;
 }
 
 export async function signOut() {
