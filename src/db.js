@@ -1,0 +1,127 @@
+import { supabase, PHOTO_BUCKET } from "./supabase.js";
+import { SEED } from "./seed.js";
+
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+
+/* Map a DB issue row (+related) to the shape the UI uses */
+function toUiIssue(row, notes, photos) {
+  return {
+    id: row.id,
+    num: row.num,
+    loc: row.loc,
+    desc: row.descr,
+    safety: row.safety,
+    status: row.status,
+    x: row.x,
+    y: row.y,
+    notes: notes
+      .filter((n) => n.issue_id === row.id)
+      .map((n) => ({ id: n.id, author: n.author, type: n.type, text: n.body, resolved: n.resolved, ts: new Date(n.created_at).getTime() })),
+    photos: photos
+      .filter((p) => p.issue_id === row.id)
+      .map((p) => ({ id: p.id, path: p.path, url: publicPhotoUrl(p.path) })),
+  };
+}
+
+export function publicPhotoUrl(path) {
+  if (!supabase) return "";
+  return supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path).data.publicUrl;
+}
+
+export async function fetchAll() {
+  const [{ data: issues, error: e1 }, { data: notes, error: e2 }, { data: photos, error: e3 }] = await Promise.all([
+    supabase.from("issues").select("*").order("num", { ascending: true }),
+    supabase.from("notes").select("*").order("created_at", { ascending: true }),
+    supabase.from("photos").select("*").order("created_at", { ascending: true }),
+  ]);
+  if (e1 || e2 || e3) throw e1 || e2 || e3;
+  return {
+    issues: (issues || []).map((r) => toUiIssue(r, notes || [], photos || [])),
+    nextNum: (issues || []).reduce((m, r) => Math.max(m, r.num), 0) + 1,
+  };
+}
+
+/** Insert the 23 shakedown issues on first ever load. */
+export async function seedIfEmpty() {
+  const { count, error } = await supabase.from("issues").select("id", { count: "exact", head: true });
+  if (error) throw error;
+  if (count && count > 0) return false;
+  const rows = SEED.map((s) => ({ num: s.n, loc: s.loc, descr: s.desc, safety: s.safety, status: "open", x: s.x, y: s.y }));
+  const { error: e2 } = await supabase.from("issues").insert(rows);
+  if (e2) throw e2;
+  return true;
+}
+
+export async function createIssue({ num, x, y }) {
+  const { data, error } = await supabase
+    .from("issues")
+    .insert({ num, x, y, loc: "New issue", descr: "" })
+    .select()
+    .single();
+  if (error) throw error;
+  return toUiIssue(data, [], []);
+}
+
+export async function updateIssueDb(id, patch) {
+  const dbPatch = {};
+  if ("loc" in patch) dbPatch.loc = patch.loc;
+  if ("desc" in patch) dbPatch.descr = patch.desc;
+  if ("safety" in patch) dbPatch.safety = patch.safety;
+  if ("status" in patch) dbPatch.status = patch.status;
+  if ("x" in patch) dbPatch.x = patch.x;
+  if ("y" in patch) dbPatch.y = patch.y;
+  if (Object.keys(dbPatch).length === 0) return;
+  const { error } = await supabase.from("issues").update(dbPatch).eq("id", id);
+  if (error) throw error;
+}
+
+export async function deleteIssueDb(issue) {
+  if (issue.photos && issue.photos.length) {
+    try { await supabase.storage.from(PHOTO_BUCKET).remove(issue.photos.map((p) => p.path)); }
+    catch { /* files may already be gone */ }
+  }
+  const { error } = await supabase.from("issues").delete().eq("id", issue.id);
+  if (error) throw error;
+}
+
+export async function addNoteDb(issueId, { author, type, text }) {
+  const { data, error } = await supabase
+    .from("notes")
+    .insert({ issue_id: issueId, author, type, body: text })
+    .select()
+    .single();
+  if (error) throw error;
+  return { id: data.id, author: data.author, type: data.type, text: data.body, resolved: data.resolved, ts: new Date(data.created_at).getTime() };
+}
+
+export async function resolveNoteDb(noteId) {
+  const { error } = await supabase.from("notes").update({ resolved: true }).eq("id", noteId);
+  if (error) throw error;
+}
+
+export async function addPhotoDb(issueId, blob) {
+  const path = `${issueId}/${uid()}.jpg`;
+  const { error: e1 } = await supabase.storage.from(PHOTO_BUCKET).upload(path, blob, { contentType: "image/jpeg" });
+  if (e1) throw e1;
+  const { data, error: e2 } = await supabase.from("photos").insert({ issue_id: issueId, path }).select().single();
+  if (e2) throw e2;
+  return { id: data.id, path, url: publicPhotoUrl(path) };
+}
+
+export async function deletePhotoDb(photo) {
+  try { await supabase.storage.from(PHOTO_BUCKET).remove([photo.path]); }
+  catch { /* file may already be gone */ }
+  const { error } = await supabase.from("photos").delete().eq("id", photo.id);
+  if (error) throw error;
+}
+
+/** Live updates: call cb whenever anyone else changes anything. Returns unsubscribe fn. */
+export function subscribeAll(cb) {
+  const channel = supabase
+    .channel("punchlist-live")
+    .on("postgres_changes", { event: "*", schema: "public", table: "issues" }, cb)
+    .on("postgres_changes", { event: "*", schema: "public", table: "notes" }, cb)
+    .on("postgres_changes", { event: "*", schema: "public", table: "photos" }, cb)
+    .subscribe();
+  return () => { try { supabase.removeChannel(channel); } catch { /* ok */ } };
+}
