@@ -4,6 +4,7 @@ import { SEED } from "./seed.js";
 import {
   fetchAll, seedIfEmpty, createIssue, updateIssueDb, deleteIssueDb,
   addNoteDb, resolveNoteDb, addPhotoDb, deletePhotoDb, subscribeAll,
+  signIn, signOut, currentSession, onAuthChange,
 } from "./db.js";
 
 /* ================= Sr Air Bud — Fix-It Tracker =================
@@ -158,9 +159,55 @@ function Photos({ issue, onAdd, onRemove, demo }) {
   );
 }
 
+/* ================= Access code screen ================= */
+function CodeGate({ onUnlock }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!code.trim() || busy) return;
+    setBusy(true); setErr("");
+    try {
+      await signIn(code.trim());
+      onUnlock();
+    } catch {
+      setErr("That code didn't work. Check with the owner and try again.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ fontFamily: "'Barlow', system-ui, sans-serif", background: "#F2F1EC", minHeight: "100vh", display: "grid", placeItems: "center", padding: 20, color: "#23272B" }}>
+      <form onSubmit={submit} style={{ background: "#fff", border: "1px solid #C9CFD4", borderRadius: 14, padding: 24, maxWidth: 360, width: "100%", boxShadow: "0 4px 14px rgba(35,39,43,0.08)" }}>
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 22, letterSpacing: 1.2, textTransform: "uppercase", borderBottom: "3px solid #C0392B", paddingBottom: 8, marginBottom: 14 }}>
+          Sr Air Bud · Fix-It List
+        </div>
+        <label htmlFor="code" style={{ display: "block", fontSize: 13.5, color: "#5B6369", marginBottom: 8 }}>
+          Enter the access code to view and update the punch list.
+        </label>
+        <input id="code" value={code} onChange={(e) => setCode(e.target.value)} autoFocus
+          type="password" inputMode="numeric" autoComplete="current-password" placeholder="6-digit code"
+          style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid #C9CFD4", fontSize: 16, fontFamily: "inherit", letterSpacing: 2 }} />
+        {err && <div role="alert" style={{ marginTop: 10, fontSize: 13, color: "#C0392B" }}>{err}</div>}
+        <button type="submit" disabled={busy || !code.trim()}
+          style={{ marginTop: 14, width: "100%", padding: "10px 16px", borderRadius: 8, border: "1px solid #2E3A45", background: "#2E3A45", color: "#fff", fontSize: 15, fontFamily: "inherit", cursor: busy ? "default" : "pointer", opacity: busy || !code.trim() ? 0.6 : 1 }}>
+          {busy ? "Checking…" : "Open the list"}
+        </button>
+        <div style={{ marginTop: 12, fontSize: 12, color: "#8A9298" }}>
+          You'll only need to do this once on this device.
+        </div>
+      </form>
+    </div>
+  );
+}
+
 /* ================= Main App ================= */
 export default function App() {
   const demo = !supabase;
+  const [authed, setAuthed] = useState(demo);
+  const [authReady, setAuthReady] = useState(demo);
   const [doc, setDoc] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [placing, setPlacing] = useState(false);
@@ -208,8 +255,26 @@ export default function App() {
     }
   }, [demo]);
 
+  /* restore an existing login, and follow sign-in / sign-out */
+  useEffect(() => {
+    if (demo) return;
+    let alive = true;
+    currentSession().then((s) => {
+      if (!alive) return;
+      setAuthed(!!s);
+      setAuthReady(true);
+    });
+    const unsub = onAuthChange((s) => {
+      setAuthed(!!s);
+      setAuthReady(true);
+      if (!s) setDoc(null);
+    });
+    return () => { alive = false; unsub(); };
+  }, [demo]);
+
   /* initial load + live subscription */
   useEffect(() => {
+    if (!authed) return;
     let alive = true;
     (async () => {
       if (demo) {
@@ -240,7 +305,7 @@ export default function App() {
     const onFocus = () => refetch();
     window.addEventListener("focus", onFocus);
     return () => { alive = false; unsub(); window.removeEventListener("focus", onFocus); };
-  }, [demo, refetch]);
+  }, [demo, refetch, authed]);
 
   const issues = doc ? doc.issues : [];
   const selected = issues.find((i) => i.id === selectedId) || null;
@@ -376,6 +441,16 @@ export default function App() {
 
   const fmtDate = (ts) => new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " +
     new Date(ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+
+  if (!authReady) {
+    return (
+      <div style={{ fontFamily: "system-ui, sans-serif", padding: 40, textAlign: "center", color: "#5B6369" }}>
+        Loading…
+      </div>
+    );
+  }
+
+  if (!authed) return <CodeGate onUnlock={() => setAuthed(true)} />;
 
   if (!doc) {
     return (
@@ -553,6 +628,9 @@ export default function App() {
       <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search…" aria-label="Search issues"
         style={{ flex: "1 1 110px", minWidth: 100, padding: "6px 9px", borderRadius: 8, border: "1px solid #C9CFD4", fontSize: 12.5, fontFamily: "inherit" }} />
       <button style={{ ...btn(false), padding: "6px 10px", fontSize: 12.5 }} onClick={copySummary}>{copied ? "Copied ✓" : "Copy summary"}</button>
+      {!demo && (
+        <button style={{ ...btn(false), padding: "6px 10px", fontSize: 12.5 }} onClick={() => signOut()}>Lock</button>
+      )}
     </div>
   );
 
